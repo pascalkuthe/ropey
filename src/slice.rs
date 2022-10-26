@@ -8,7 +8,7 @@ use crate::str_utils::{
     char_to_line_idx, count_chars, count_line_breaks, count_utf16_surrogates, line_to_byte_idx,
     line_to_char_idx, utf16_code_unit_to_char_idx,
 };
-use crate::tree::{Count, Node, TextInfo};
+use crate::tree::{Count, Node, TextInfo, MIN_BYTES};
 use crate::{end_bound_to_num, start_bound_to_num, Error, Result};
 
 /// An immutable view into part of a `Rope`.
@@ -1961,9 +1961,41 @@ impl<'a, 'b> std::cmp::PartialOrd<RopeSlice<'b>> for RopeSlice<'a> {
 
 impl<'a> std::hash::Hash for RopeSlice<'a> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // we can not simply call state.write(chunk) for each chunk
+        // because Hasher.write only produces the same input if the
+        // calls match exactly. See documentation of hash and hast_02 test below
+        // so we have to perform some tricks here to ensure that the same
+        // calls to write are produce no matter the chunk layout
+        let mut accumulator = [0u8; MIN_BYTES];
+        let mut accumulator_pos = 0;
         for chunk in self.chunks() {
-            state.write(chunk.as_bytes());
+            let chunk = chunk.as_bytes();
+            // rare case that occurs if chunk.len() < MIN_BYTES
+            if chunk.len() < MIN_BYTES - accumulator_pos {
+                let start = accumulator_pos;
+                accumulator_pos += chunk.len();
+                accumulator[start..accumulator_pos].copy_from_slice(chunk);
+                continue;
+            }
+            // this bounds check always succedes because all chunks are larger then MIN_BYTES
+            // the only exception is the root leaf in a small file but that would be `RSEnum::Light`
+            // invariant for all cunks: MIN_BYTES <= chunk.len() <= MAX_BYTES < 3* MIN_BYTES
+            let (mut head, mut chunk) = chunk.split_at(MIN_BYTES - accumulator_pos);
+            accumulator[accumulator_pos..].copy_from_slice(head);
+            state.write(&accumulator);
+            if chunk.len() >= MIN_BYTES {
+                (head, chunk) = chunk.split_at(MIN_BYTES);
+                state.write(head);
+                if chunk.len() >= MIN_BYTES {
+                    (head, chunk) = chunk.split_at(MIN_BYTES);
+                    state.write(head);
+                }
+            }
+            // now chunk.len() < MIN_BYTES
+            accumulator_pos = chunk.len();
+            accumulator[..accumulator_pos].copy_from_slice(chunk);
         }
+        state.write(&accumulator[..accumulator_pos]);
 
         // Same strategy as `&str` in stdlib, so that e.g. two adjacent
         // fields in a `#[derive(Hash)]` struct with "Hi " and "there"
@@ -3038,6 +3070,58 @@ mod tests {
 
         r.hash(&mut h1);
         s.hash(&mut h2);
+
+        assert_eq!(h1.finish(), h2.finish());
+    }
+
+    #[test]
+    fn hash_02() {
+        /// This is an example hash to demonstrate a property commmon garunteed by
+        /// the documentation that is not exploited by the default hasher (SipHash)
+        /// Relevant exerpt from the `Hash` documentation:
+        /// > Nor can you assume that adjacent
+        /// > `write` calls are merged, so it's possible, for example, that
+        /// > ```
+        /// > # fn foo(hasher: &mut impl std::hash::Hasher) {
+        /// > hasher.write(&[1, 2]);
+        /// > hasher.write(&[3, 4, 5, 6]);
+        /// > # }
+        /// > ```
+        /// > and
+        /// > ```
+        /// > # fn foo(hasher: &mut impl std::hash::Hasher) {
+        /// > hasher.write(&[1, 2, 3, 4]);
+        /// > hasher.write(&[5, 6]);
+        /// > # }
+        /// > ```
+        /// > end up producing different hashes.
+        ///
+        /// This dummy hasher simply hashes `42` as seperator at the end of `write`.
+        /// While this hasher might seem a little silly, it is perfectly inline with the std documentation.
+        /// Many other common high performance hashers (fxhash, ahash, fnvhash) exploit the same property
+        /// to improve the performance of `write`, so violating this property will cause issues in practice.
+        #[derive(Default)]
+        struct TestHasher(std::collections::hash_map::DefaultHasher);
+        impl Hasher for TestHasher {
+            fn finish(&self) -> u64 {
+                self.0.finish()
+            }
+
+            fn write(&mut self, bytes: &[u8]) {
+                self.0.write(bytes);
+                self.0.write(&[42]);
+            }
+        }
+        let mut h1 = TestHasher::default();
+        let mut h2 = TestHasher::default();
+        let r1 = Rope::from_str("Hthere!");
+        let mut r2 = Rope::from_str("H");
+        r2.append(Rope::from_str("there!"));
+        let s1 = r1.slice(..);
+        let s2 = r2.slice(..);
+
+        s1.hash(&mut h1);
+        s2.hash(&mut h2);
 
         assert_eq!(h1.finish(), h2.finish());
     }
