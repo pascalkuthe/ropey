@@ -8,7 +8,6 @@ use ropey::Rope;
 use std::hash::{Hasher, Hash};
 
 const SMALL_TEXT: &str = include_str!("small.txt");
-const MEDIUM_TEXT: &str = include_str!("medium.txt");
 
 /// This is an example hash to demonstrate a property commmon garunteed by
 /// the documentation that is not exploited by the default hasher (SipHash)
@@ -59,14 +58,12 @@ enum Op<'a> {
 #[derive(Arbitrary, Copy, Clone, Debug)]
 enum StartingText<'a> {
     Small,
-    Medium,
     Custom(&'a str),
 }
 
 fuzz_target!(|data: (StartingText, Vec<Op>)| {
     let mut r = Rope::from_str(match data.0 {
         StartingText::Small => SMALL_TEXT,
-        StartingText::Medium => MEDIUM_TEXT,
         StartingText::Custom(s) => s,
     });
 
