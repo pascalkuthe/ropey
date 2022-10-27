@@ -2052,9 +2052,41 @@ impl std::cmp::PartialOrd<Rope> for Rope {
 
 impl std::hash::Hash for Rope {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // we can not simply call state.write(chunk) for each chunk
+        // because Hasher.write only produces the same input if the
+        // calls match exactly. See documentation of hash and hast_02 test below
+        // so we have to perform some tricks here to ensure that the same
+        // calls to write are produce no matter the chunk layout
+        let mut accumulator = [0u8; MIN_BYTES];
+        let mut accumulator_pos = 0;
         for chunk in self.chunks() {
-            state.write(chunk.as_bytes());
+            let chunk = chunk.as_bytes();
+            // rare case that occurs if chunk.len() < MIN_BYTES
+            if chunk.len() < MIN_BYTES - accumulator_pos {
+                let start = accumulator_pos;
+                accumulator_pos += chunk.len();
+                accumulator[start..accumulator_pos].copy_from_slice(chunk);
+                continue;
+            }
+            // this bounds check always succedes because all chunks are larger then MIN_BYTES
+            // the only exception is the root leaf in a small file but that would be `RSEnum::Light`
+            // invariant for all cunks: MIN_BYTES <= chunk.len() <= MAX_BYTES < 3* MIN_BYTES
+            let (mut head, mut chunk) = chunk.split_at(MIN_BYTES - accumulator_pos);
+            accumulator[accumulator_pos..].copy_from_slice(head);
+            state.write(&accumulator);
+            if chunk.len() >= MIN_BYTES {
+                (head, chunk) = chunk.split_at(MIN_BYTES);
+                state.write(head);
+                if chunk.len() >= MIN_BYTES {
+                    (head, chunk) = chunk.split_at(MIN_BYTES);
+                    state.write(head);
+                }
+            }
+            // now chunk.len() < MIN_BYTES
+            accumulator_pos = chunk.len();
+            accumulator[..accumulator_pos].copy_from_slice(chunk);
         }
+        state.write(&accumulator[..accumulator_pos]);
 
         // Same strategy as `&str` in stdlib, so that e.g. two adjacent
         // fields in a `#[derive(Hash)]` struct with "Hi " and "there"
