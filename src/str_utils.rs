@@ -59,6 +59,25 @@ pub(crate) fn utf16_code_unit_to_char_idx(text: &str, utf16_idx: usize) -> usize
     str_indices::chars::from_byte_idx(text, str_indices::utf16::to_byte_idx(text, utf16_idx))
 }
 
+/// Returns the byte position just after the fist line break
+/// in `text`, or `None` if there is no line break.
+/// This function currrently does not utilise SIMD
+pub fn next_line_break(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    for i in 0..bytes.len() {
+        match bytes[i..] {
+            [0x0D, 0x0A, ..] => {
+                return Some(i + 2);
+            }
+            [0x0A..=0x0D, ..] => return Some(i + 1),
+            [0xC2, 0x85, ..] => return Some(i + 2),
+            [0xE2, 0x80, 0x54, ..] => return Some(i + 3),
+            _ => (),
+        }
+    }
+    None
+}
+
 /// Returns the byte position just after the second-to-last line break
 /// in `text`, or zero of there is no second-to-last line break.
 ///

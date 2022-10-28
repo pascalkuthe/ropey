@@ -717,6 +717,10 @@ proptest! {
     fn pt_lines_iter_exact_01(idx in 1024usize..(CHAR_LEN - 1024)) {
         let r = Rope::from_str(TEXT);
         let s = r.slice(idx..(idx + 373));
+        // newline terminator must never be split
+        if s.char(372) == '\r'{
+            return Ok(())
+        }
 
         // Forward
         let mut line_count = s.len_lines();
